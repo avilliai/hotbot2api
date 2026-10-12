@@ -348,11 +348,17 @@ def _make_tool_call_sse(tool_calls: list[dict], clean_text: str, model: str) -> 
 
 def _is_quota_error(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return any(k in msg for k in ("quota", "limit", "429", "too many", "rate limit"))
+    return any(k in msg for k in (
+        "quota", "limit", "429", "too many", "rate limit", "rate_limit",
+        "unexpected non-stream response", "sign in", "guest sessions are limited",
+        "limit_guest",
+    ))
 
 def _is_auth_error(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return any(k in msg for k in ("cookie_expired", "401", "unauthorized", "forbidden", "403"))
+    return any(k in msg for k in (
+        "cookie_expired", "expired", "401", "unauthorized", "forbidden", "403", "auth error"
+    ))
 
 
 # ══════════════════════════════════════════════════════════
@@ -473,14 +479,10 @@ async def chat_completions(request: Request):
                     except Exception as e:
                         last_error = e
                         log.warning("stream(tools) attempt %d/%d 失败: %s", attempt, MAX_RETRIES, e)
-                        if acc and _is_quota_error(e):
+                        if acc:
+                            fail_reason = "quota_exhausted" if _is_quota_error(e) else ("cookie_expired" if _is_auth_error(e) else str(e))
                             try:
-                                acc = await cm.mark_failed_and_get_replacement(acc, "quota_exhausted", attempt=attempt)
-                            except Exception:
-                                pass
-                        elif acc and _is_auth_error(e):
-                            try:
-                                acc = await cm.mark_failed_and_get_replacement(acc, "cookie_expired", attempt=attempt)
+                                await cm.report_failure(acc, fail_reason)
                             except Exception:
                                 pass
                         elif attempt < MAX_RETRIES:
@@ -544,14 +546,10 @@ async def chat_completions(request: Request):
                 except Exception as e:
                     last_err = e
                     log.warning("regular stream attempt %d/%d failed: %s", attempt, MAX_RETRIES, e)
-                    if acc and _is_quota_error(e):
+                    if acc:
+                        fail_reason = "quota_exhausted" if _is_quota_error(e) else ("cookie_expired" if _is_auth_error(e) else str(e))
                         try:
-                            acc = await cm.mark_failed_and_get_replacement(acc, "quota_exhausted", attempt=attempt)
-                        except Exception:
-                            pass
-                    elif acc and _is_auth_error(e):
-                        try:
-                            acc = await cm.mark_failed_and_get_replacement(acc, "cookie_expired", attempt=attempt)
+                            await cm.report_failure(acc, fail_reason)
                         except Exception:
                             pass
                     elif attempt < MAX_RETRIES:
@@ -637,14 +635,10 @@ async def chat_completions(request: Request):
         except Exception as e:
             last_error = e
             log.warning("non-stream attempt %d/%d failed: %s", attempt, MAX_RETRIES, e)
-            if acc and _is_quota_error(e):
+            if acc:
+                fail_reason = "quota_exhausted" if _is_quota_error(e) else ("cookie_expired" if _is_auth_error(e) else str(e))
                 try:
-                    acc = await cm.mark_failed_and_get_replacement(acc, "quota_exhausted", attempt=attempt)
-                except Exception:
-                    pass
-            elif acc and _is_auth_error(e):
-                try:
-                    acc = await cm.mark_failed_and_get_replacement(acc, "cookie_expired", attempt=attempt)
+                    await cm.report_failure(acc, fail_reason)
                 except Exception:
                     pass
             elif attempt < MAX_RETRIES:

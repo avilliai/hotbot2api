@@ -127,7 +127,8 @@ class HotBotRegister:
                     cookies=cookies,
                     timeout=30
                 )
-                if r.status_code == 200:
+                ct = r.headers.get("content-type", "")
+                if r.status_code == 200 and "text/event-stream" in ct:
                     resp_cookie = s.cookies.get("guest_chat_session") or guest_uuid
                     log.info(f"Successfully generated HotBot session account: {resp_cookie[:8]}... (IP: {fake_ip})")
                     return {
@@ -270,18 +271,25 @@ async def stream_hotbot_response(
         )
 
         if resp.status_code != 200:
-            err_text = resp.text
+            err_text = await resp.atext()
             raise ServerError(f"HotBot API returned status {resp.status_code}: {err_text[:200]}")
 
         # Check content type
         content_type = resp.headers.get("content-type", "")
         if "text/event-stream" not in content_type:
-            # Maybe returned json rate limit error
-            err_text = resp.text
+            # Maybe returned json rate limit / error
+            err_text = await resp.atext()
             try:
                 err_json = json.loads(err_text)
-                if "rate_limit" in err_json.get("type", "") or "rate_limit" in err_json.get("code", ""):
-                    raise ServerError(f"HotBot rate limit: {err_json.get('detail', 'Rate limited')}")
+                err_type = str(err_json.get("type", "")).lower()
+                err_code = str(err_json.get("code", "")).lower()
+                err_detail = err_json.get("detail") or err_json.get("title") or err_text
+                if any(k in err_type or k in err_code for k in ("rate_limit", "limit", "quota")) or "guest sessions are limited" in err_text.lower() or "sign in" in err_text.lower():
+                    raise ServerError(f"HotBot rate limit: {err_detail}")
+                if any(k in err_type or k in err_code for k in ("auth", "unauthorized", "forbidden")):
+                    raise ServerError(f"HotBot auth error: {err_detail}")
+            except ServerError:
+                raise
             except Exception:
                 pass
             raise ServerError(f"Unexpected non-stream response: {err_text[:200]}")

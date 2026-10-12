@@ -129,6 +129,11 @@ class CookieManager:
 
     async def get_account(self) -> AccountState:
         """Round-robin selection of active account"""
+        valid_pool = [idx for idx in self.active_pool if self._account_is_eligible(self._find_by_index(idx))]
+        if len(valid_pool) != len(self.active_pool):
+            self.active_pool = valid_pool
+            self.save()
+
         if not self.active_pool:
             await self.replenish_active_pool()
 
@@ -146,6 +151,8 @@ class CookieManager:
 
         acc = self._find_by_index(target_idx)
         if not self._account_is_eligible(acc):
+            if target_idx in self.active_pool:
+                self.active_pool.remove(target_idx)
             asyncio.create_task(self.replenish_active_pool())
             return await self.get_account()
 
@@ -165,10 +172,22 @@ class CookieManager:
 
     async def report_failure(self, account: AccountState, reason: str = ""):
         account.fail_count += 1
+        reason_lower = str(reason).lower()
         log.warning(f"Account {account.email} failed ({account.fail_count}/{FAIL_THRESHOLD}): {reason}")
-        if account.fail_count >= FAIL_THRESHOLD or "rate limit" in reason.lower() or "limit_guest" in reason.lower():
-            account.healthy = False
-            account.disabled = True
+        is_terminal = (
+            account.fail_count >= FAIL_THRESHOLD
+            or any(k in reason_lower for k in (
+                "rate limit", "rate_limit", "limit_guest", "quota",
+                "guest sessions are limited", "cookie_expired", "expired",
+                "unauthorized", "forbidden", "401", "403", "sign in"
+            ))
+        )
+        if is_terminal:
+            if any(k in reason_lower for k in ("quota", "limit", "rate")):
+                account.mark_quota_exhausted()
+            else:
+                account.healthy = False
+                account.disabled = True
             if account.index in self.active_pool:
                 self.active_pool.remove(account.index)
             asyncio.create_task(self.replenish_active_pool())
